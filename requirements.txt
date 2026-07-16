@@ -3,4 +3,4 @@ Flask-Cors==4.0.0
 python-dotenv==1.2.1
 web3==6.11.1
 gunicorn==21.2.0
-setuptools
+setuptools==69.5.1
