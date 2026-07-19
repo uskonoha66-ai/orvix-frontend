@@ -2,8 +2,8 @@ import { useState, useCallback } from 'react';
 import { Contract, formatUnits } from 'ethers';
 import { withRpcRetry, isRateLimitError } from './rpcRetry';
 import { useSettings } from '../contexts/SettingsContext';
-import { ADDRESSES, ORVIX_ABI, ERC20_ABI } from '../constants/contracts';
-import type { TokenInfo, QuoteResult, PoolAssessment } from '../types';
+import { ADDRESSES, ERC20_ABI } from '../constants/contracts';
+import type { TokenInfo, PoolAssessment } from '../types';
 
 function parseBackendError(e: unknown): string {
   if (!e) return 'Unknown error';
@@ -32,29 +32,41 @@ function parseBackendError(e: unknown): string {
   return 'Unknown error';
 }
 
-function toWeiAmount(amount: string, decimals: number): bigint {
-  // Parse as decimal string to avoid scientific notation from BigInt
+function toWeiAmount(amount: string, decimals: number): string {
+  // Parse as decimal string to avoid scientific notation
   const [intPart, fracPart = ''] = amount.split('.');
   const padded = (fracPart + '0'.repeat(decimals)).slice(0, decimals);
   const combined = (intPart + padded).replace(/^0+/, '') || '0';
-  return BigInt(combined);
+  return combined;
 }
+
+const DEFAULT_BACKEND_URL = 'https://orvixbackend.vercel.app';
 
 export function useQuote() {
   const { settings } = useSettings();
-  const [quote, setQuote] = useState<QuoteResult | null>(null);
   const [pools, setPools] = useState<PoolAssessment[]>([]);
+  const [selectedPool, setSelectedPool] = useState<PoolAssessment | null>(null);
   const [loading, setLoading] = useState(false);
+  const [selectingPool, setSelectingPool] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchQuote = useCallback(
-    async (tokenIn: TokenInfo, tokenOut: TokenInfo, amountIn: string) => {
+  const fetchPools = useCallback(
+    async (tokenIn: TokenInfo, tokenOut: TokenInfo, amountIn: string, userAddress: string) => {
       if (!amountIn || parseFloat(amountIn) <= 0) {
-        setQuote(null);
+        setPools([]);
+        setSelectedPool(null);
         setError(null);
         return;
       }
 
+      if (!userAddress) {
+        setError('Wallet not connected');
+        return;
+      }
+
+      // Reset previous results when token/amount changes
+      setPools([]);
+      setSelectedPool(null);
       setLoading(true);
       setError(null);
 
@@ -62,76 +74,145 @@ export function useQuote() {
         const decimalsIn = tokenIn.decimals;
         const amountInWei = toWeiAmount(amountIn, decimalsIn);
 
-        const result = await withRpcRetry(async (provider) => {
-          const contract = new Contract(ADDRESSES.ORVIX_AGGREGATOR, ORVIX_ABI, provider);
-          return contract.quoteExactInput(
-            tokenIn.address,
-            tokenOut.address,
-            amountInWei,
-            [], // factories — empty = auto
-            BigInt(settings.slippageBps)
-          );
-        }, settings.rpcUrl);
-
-        const r = result;
-        setQuote({
-          hops: r.hops,
-          amountOut: r.amountOut,
-          priceImpact: r.priceImpact,
-          amountOutMin: r.amountOutMin,
-          path: r.path,
-          liquidityProfile: r.liquidityProfile,
-          poolLiquidity: r.poolLiquidity,
-          bestPool: r.bestPool,
+        const backendUrl = settings.backendUrl || DEFAULT_BACKEND_URL;
+        const response = await fetch(`${backendUrl}/api/assess-pools`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            token_in: tokenIn.address,
+            token_out: tokenOut.address,
+            amount_in: amountInWei,
+            user_address: userAddress,
+            rpc_url: settings.rpcUrl, // power-user custom RPC, backend falls back to default if it fails
+          }),
         });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to assess pools');
+        }
+
+        const data = await response.json();
+
+        const assessedPools: PoolAssessment[] = data.assessments.map((p: any) => ({
+          pool: p.pool,
+          output: BigInt(p.output),
+          liquidity: BigInt(p.liquidity),
+          priceImpact: BigInt(p.price_impact_bps),
+          score: BigInt(p.score),
+          eligible: p.eligible,
+          failReason: BigInt(p.fail_reason_code),
+          // path/amountOutMin/factory are NOT present yet — only populated
+          // once the user clicks this pool, via selectPool() below.
+        }));
+
+        setPools(assessedPools);
+
+        // Don't auto-select - user must click to select
+        setSelectedPool(null);
       } catch (e) {
-        setQuote(null);
+        setPools([]);
+        setSelectedPool(null);
         setError(isRateLimitError(e) ? 'RPC rate limited. Retrying with alternate node...' : parseBackendError(e));
       } finally {
         setLoading(false);
       }
     },
-    [settings]
+    [settings.backendUrl, settings.rpcUrl]
   );
 
-  const fetchPools = useCallback(
-    async (tokenIn: TokenInfo, tokenOut: TokenInfo, amountIn: string) => {
-      if (!amountIn || parseFloat(amountIn) <= 0) return;
+  /**
+   * Called when the user clicks a pool from the Pool Assessment list.
+   *
+   * Sets the pool as selected immediately (so the UI feels responsive and
+   * highlights the chosen card right away), then fetches the real swap
+   * `path` for that SPECIFIC pool from the backend's
+   * POST /api/build-path-for-pool endpoint.
+   *
+   * This deliberately does NOT call quoteExactInput() — Orvix lets the user
+   * pick any of the 3 pools shown (not just the best-scored one) as an
+   * educational/transparency feature, matching the CLI's
+   * "SELECT POOL FOR SWAP" flow. quoteExactInput() always auto-picks the
+   * best pool internally, so it can't build a path for a user-chosen
+   * non-best pool — the backend instead replicates the contract's own
+   * path-encoding logic directly (see Trade-Backend.py encode_path()).
+   */
+  const selectPool = useCallback(
+    async (pool: PoolAssessment, tokenIn: TokenInfo, tokenOut: TokenInfo) => {
+      // Show the selection immediately for responsive UX
+      setSelectedPool(pool);
+      setError(null);
 
+      if (!pool.eligible) {
+        // Ineligible pools (failReason != 0) can't be swapped — no point
+        // fetching a path for them.
+        return;
+      }
+
+      setSelectingPool(true);
       try {
-        const decimalsIn = tokenIn.decimals;
-        const amountInWei = toWeiAmount(amountIn, decimalsIn);
+        const backendUrl = settings.backendUrl || DEFAULT_BACKEND_URL;
+        const response = await fetch(`${backendUrl}/api/build-path-for-pool`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token_in: tokenIn.address,
+            token_out: tokenOut.address,
+            pool_address: pool.pool,
+            pool_output: pool.output.toString(),
+            slippage_bps: settings.slippageBps,
+            rpc_url: settings.rpcUrl,
+          }),
+        });
 
-        const result = await withRpcRetry(async (provider) => {
-          const contract = new Contract(ADDRESSES.ORVIX_AGGREGATOR, ORVIX_ABI, provider);
-          return contract.assessPools(
-            tokenIn.address,
-            tokenOut.address,
-            amountInWei,
-            [], // factories
-            false // rawMode = false
-          );
-        }, settings.rpcUrl);
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to build path for selected pool');
+        }
 
-        setPools(
-          result.map((p: { pool: string; output: bigint; liquidity: bigint; priceImpact: bigint; score: bigint; eligible: boolean; failReason: bigint }) => ({
-            pool: p.pool,
-            output: p.output,
-            liquidity: p.liquidity,
-            priceImpact: p.priceImpact,
-            score: p.score,
-            eligible: p.eligible,
-            failReason: p.failReason,
-          }))
-        );
-      } catch {
-        setPools([]);
+        const data = await response.json();
+
+        // Merge path/amountOutMin/factory info into the selected pool.
+        // Functional update so this stays correct even if the user rapidly
+        // clicks a different pool while this fetch is still in flight.
+        setSelectedPool((current) => {
+          if (!current || current.pool !== pool.pool) return current;
+          return {
+            ...current,
+            path: data.path,
+            amountOutMin: BigInt(data.amount_out_min),
+            factory: data.factory,
+            feeNumerator: data.fee_numerator,
+            feeDenominator: data.fee_denominator,
+          };
+        });
+      } catch (e) {
+        setError(isRateLimitError(e) ? 'RPC rate limited. Retrying with alternate node...' : parseBackendError(e));
+      } finally {
+        setSelectingPool(false);
       }
     },
-    [settings]
+    [settings.backendUrl, settings.slippageBps, settings.rpcUrl]
   );
 
-  return { quote, pools, loading, error, fetchQuote, fetchPools };
+  const resetPools = useCallback(() => {
+    setPools([]);
+    setSelectedPool(null);
+    setError(null);
+  }, []);
+
+  return {
+    pools,
+    selectedPool,
+    loading,
+    selectingPool, // true while fetching path for a just-clicked pool
+    error,
+    fetchPools,
+    selectPool,
+    resetPools,
+  };
 }
 
 export function useTokenBalance() {
@@ -181,3 +262,4 @@ export function useAllowance() {
 }
 
 export { parseBackendError };
+

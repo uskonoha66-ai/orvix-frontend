@@ -35,6 +35,16 @@ export interface PoolAssessment {
   score: bigint;
   eligible: boolean;
   failReason: bigint;
+  // Populated AFTER the user clicks this pool, via POST /api/build-path-for-pool.
+  // Not present in the raw assessPools() response — the backend derives it by
+  // reverse-looking-up the factory that produced this pool (see
+  // find_factory_for_pool in Trade-Backend.py) rather than calling
+  // quoteExactInput(), so the user can pick ANY pool, not just the best one.
+  path?: string;
+  amountOutMin?: bigint;
+  factory?: string;
+  feeNumerator?: number;
+  feeDenominator?: number;
 }
 
 export interface SwapSettings {
@@ -44,6 +54,7 @@ export interface SwapSettings {
   maxImpactBps: number;
   treasury: string;
   integrator: string;
+  backendUrl?: string;
 }
 
 export type SwapStatus =
@@ -103,3 +114,4 @@ export function decodeFailReason(mask: bigint): string {
   }
   return reasons.length ? reasons.join(' | ') : 'None';
 }
+
