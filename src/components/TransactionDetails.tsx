@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, Clock, Fuel, Route, Percent, Activity, Link as LinkIcon, CheckCircle, XCircle, Loader2 } from 'lucide-react';
-import type { TxInfo, QuoteResult } from '../types';
+import type { TxInfo, PoolAssessment } from '../types';
 import { BLOCK_EXPLORER } from '../constants/contracts';
 
 interface TransactionDetailsProps {
-  quote: QuoteResult | null;
+  selectedPool: PoolAssessment | null;
   txInfo: TxInfo | null;
 }
 
@@ -14,10 +14,11 @@ function shortAddr(addr: string): string {
   return addr.slice(0, 8) + '...' + addr.slice(-4);
 }
 
-export default function TransactionDetails({ quote, txInfo }: TransactionDetailsProps) {
+export default function TransactionDetails({ selectedPool, txInfo }: TransactionDetailsProps) {
   const [expanded, setExpanded] = useState(false);
 
-  const hasContent = quote || txInfo;
+  const hasPath = !!selectedPool?.path;
+  const hasContent = hasPath || txInfo;
 
   return (
     <div className="px-5 md:px-0 md:max-w-[480px] mx-auto w-full">
@@ -40,32 +41,25 @@ export default function TransactionDetails({ quote, txInfo }: TransactionDetails
             className="overflow-hidden"
           >
             <div className="p-3 space-y-2.5">
-              <Row icon={<Percent size={14} />} label="Liquidity Provider Fee" value="0.25%" />
+              <Row
+                icon={<Percent size={14} />}
+                label="Liquidity Provider Fee"
+                value={
+                  selectedPool?.feeNumerator !== undefined && selectedPool?.feeDenominator
+                    ? `${(100 - (selectedPool.feeNumerator / selectedPool.feeDenominator) * 100).toFixed(2)}%`
+                    : '0.25%'
+                }
+              />
               <Row icon={<Activity size={14} />} label="Swap Fee" value="0.05%" />
-
-              {quote && (
-                <Row icon={<Route size={14} />} label="Execution Path" value={quote.hops.length > 1 ? `${quote.hops.length} hops` : 'Direct'} />
-              )}
-
+              <Row icon={<Route size={14} />} label="Execution Path" value="Direct" />
               <Row icon={<Clock size={14} />} label="Est. Confirmation Time" value="~3 sec" />
-              <Row icon={<Fuel size={14} />} label="Gas Used" value={quote ? '~180,000 gas' : '—'} />
+              <Row icon={<Fuel size={14} />} label="Gas Used" value={hasPath ? '~180,000 gas' : '—'} />
 
-              {quote && (
-                <Row icon={<Route size={14} />} label="Backend Route" value={shortAddr(quote.bestPool)} />
+              {selectedPool && (
+                <Row icon={<Route size={14} />} label="Pool" value={shortAddr(selectedPool.pool)} />
               )}
-
-              {quote && quote.hops.length > 0 && (
-                <div className="pt-1">
-                  <p className="text-xs text-text-muted mb-1.5">Path Detail</p>
-                  <div className="space-y-1">
-                    {quote.hops.map((h, i) => (
-                      <div key={i} className="flex items-center justify-between text-[11px]">
-                        <span className="text-text-secondary">{shortAddr(h.pool)}</span>
-                        <span className="text-text-muted">→ {shortAddr(h.tokenOut)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              {selectedPool?.factory && (
+                <Row icon={<Route size={14} />} label="Factory" value={shortAddr(selectedPool.factory)} />
               )}
 
               {txInfo && (
@@ -106,3 +100,4 @@ function Row({ icon, label, value }: { icon: React.ReactNode; label: string; val
     </div>
   );
 }
+

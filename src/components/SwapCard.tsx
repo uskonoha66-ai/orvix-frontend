@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowDownUp, Loader2, Settings2, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
-import type { TokenInfo, SwapMode } from '../types';
+import type { TokenInfo, SwapMode, PoolAssessment } from '../types';
 import { useWallet } from '../contexts/WalletContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { useToast } from '../contexts/ToastContext';
 import { useQuote, useTokenBalance, useAllowance } from '../hooks/useQuote';
-import { useSwapExecution } from '../hooks/useSwap';
-import { VERIFIED_TOKENS, ADDRESSES, QUOTE_REFRESH_MS } from '../constants/contracts';
-import { formatUnits } from 'ethers';
+import { useSwapExecution } from '../hooks/useSwapExecution';
+import { VERIFIED_TOKENS, ADDRESSES } from '../constants/contracts';
 import TokenModal from './TokenModal';
 import QuoteDetails from './QuoteDetails';
 import TransactionDetails from './TransactionDetails';
@@ -31,13 +30,21 @@ export default function SwapCard() {
   const [allowance, setAllowance] = useState<bigint>(0n);
   const [showSlippage, setShowSlippage] = useState(false);
 
-  const { quote, pools, loading: quoteLoading, error: quoteError, fetchQuote, fetchPools } = useQuote();
+  const {
+    pools,
+    selectedPool,
+    loading: poolsLoading,
+    selectingPool,
+    error: poolsError,
+    fetchPools,
+    selectPool,
+    resetPools,
+  } = useQuote();
   const { getBalance } = useTokenBalance();
   const { getAllowance } = useAllowance();
   const { status, txInfo, error: swapError, approve, swap, wrapBNB, unwrapWBNB, reset } = useSwapExecution();
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Detect wrap/unwrap mode
   const isWrapMode = tokenIn.isNative && tokenOut.address === ADDRESSES.WBNB;
@@ -82,30 +89,33 @@ export default function SwapCard() {
     return () => { cancelled = true; };
   }, [tokenIn, tokenOut, address, connected, getBalance]);
 
-  // Fetch quote with debounce
+  // Fetch pool assessments with debounce (replaces the old fetchQuote polling —
+  // no auto-refresh interval anymore, since the user picks a pool manually and
+  // we don't want the selection to reset itself mid-decision)
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (refreshRef.current) clearInterval(refreshRef.current);
 
-    if (swapMode !== 'swap') return; // wrap/unwrap don't need quotes
-    if (!amountIn || parseFloat(amountIn) <= 0) return;
+    if (swapMode !== 'swap') {
+      resetPools();
+      return;
+    }
+    if (!amountIn || parseFloat(amountIn) <= 0 || !address) {
+      resetPools();
+      return;
+    }
 
     debounceRef.current = setTimeout(() => {
-      fetchQuote(tokenIn, tokenOut, amountIn);
-      fetchPools(tokenIn, tokenOut, amountIn);
+      fetchPools(tokenIn, tokenOut, amountIn, address);
     }, 350);
-
-    refreshRef.current = setInterval(() => {
-      fetchQuote(tokenIn, tokenOut, amountIn);
-    }, QUOTE_REFRESH_MS);
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
-      if (refreshRef.current) clearInterval(refreshRef.current);
     };
-  }, [amountIn, tokenIn, tokenOut, swapMode, fetchQuote, fetchPools]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amountIn, tokenIn, tokenOut, swapMode, address]);
 
-  // Check allowance when quote is ready
+  // Check allowance when a pool has been selected (i.e. we have a real path
+  // and are about to need approval)
   useEffect(() => {
     if (!connected || !address || !amountIn || tokenIn.isNative || swapMode !== 'swap') {
       setAllowance(0n);
@@ -144,6 +154,7 @@ export default function SwapCard() {
     setTokenIn(tokenOut);
     setTokenOut(tokenIn);
     setAmountIn('');
+    resetPools();
     reset();
   };
 
@@ -156,6 +167,7 @@ export default function SwapCard() {
       setTokenOut(t);
     }
     setAmountIn('');
+    resetPools();
     reset();
   };
 
@@ -163,11 +175,17 @@ export default function SwapCard() {
     if (balanceIn) setAmountIn(parseFloat(balanceIn).toString());
   };
 
-  const needsApproval = swapMode === 'swap' && !tokenIn.isNative && quote && allowance < (BigInt(Math.floor(parseFloat(amountIn) * 10 ** tokenIn.decimals)) || 0n);
+  const handlePoolSelect = (pool: PoolAssessment) => {
+    selectPool(pool, tokenIn, tokenOut);
+  };
 
-  const insufficientBalance = balanceIn !== null && amountIn && parseFloat(amountIn) > parseFloat(balanceIn);
+  const amountInWeiApprox = amountIn ? BigInt(Math.floor(parseFloat(amountIn) * 10 ** tokenIn.decimals)) : 0n;
+  const needsApproval =
+    swapMode === 'swap' && !tokenIn.isNative && !!selectedPool?.path && allowance < amountInWeiApprox;
 
-  const priceImpactHigh = quote && Number(quote.priceImpact) > settings.maxImpactBps;
+  const insufficientBalance = balanceIn !== null && amountIn !== '' && parseFloat(amountIn) > parseFloat(balanceIn);
+
+  const priceImpactHigh = !!selectedPool && Number(selectedPool.priceImpact) > settings.maxImpactBps;
 
   const handleApprove = async () => {
     if (!provider) return;
@@ -179,14 +197,15 @@ export default function SwapCard() {
   };
 
   const handleSwap = async () => {
-    if (!provider || !quote) return;
+    if (!provider || !selectedPool || !selectedPool.path) return;
     if (priceImpactHigh) {
       toast({ type: 'warning', title: 'Price Impact Too High', description: 'Consider reducing the amount' });
       return;
     }
-    const hash = await swap(tokenIn, tokenOut, amountIn, quote, provider);
+    const hash = await swap(tokenIn, tokenOut, amountIn, selectedPool, provider);
     if (hash) {
       setAmountIn('');
+      resetPools();
       // Refresh balances
       if (address) {
         const [b1, b2] = await Promise.all([
@@ -228,8 +247,7 @@ export default function SwapCard() {
     if (!connected) return { label: 'Connect Wallet', action: () => connect('metamask'), disabled: false, variant: 'primary' };
     if (!amountIn || parseFloat(amountIn) <= 0) return { label: 'Enter Amount', action: () => {}, disabled: true, variant: 'default' };
     if (insufficientBalance) return { label: 'Insufficient Balance', action: () => {}, disabled: true, variant: 'error' };
-    if (quoteError) return { label: quoteError, action: () => {}, disabled: true, variant: 'error' };
-    if (priceImpactHigh) return { label: 'Price Impact Too High', action: () => {}, disabled: true, variant: 'warning' };
+    if (poolsError) return { label: poolsError, action: () => {}, disabled: true, variant: 'error' };
 
     if (swapMode === 'wrap') {
       if (status === 'wrapping') return { label: 'Wrapping...', action: () => {}, disabled: true, variant: 'loading' };
@@ -239,6 +257,13 @@ export default function SwapCard() {
       if (status === 'unwrapping') return { label: 'Unwrapping...', action: () => {}, disabled: true, variant: 'loading' };
       return { label: 'Unwrap WBNB', action: handleWrapUnwrap, disabled: false, variant: 'primary' };
     }
+
+    // swap mode from here on
+    if (!selectedPool) return { label: 'Select a Pool', action: () => {}, disabled: true, variant: 'default' };
+    if (selectingPool) return { label: 'Fetching Path...', action: () => {}, disabled: true, variant: 'loading' };
+    if (!selectedPool.eligible) return { label: 'Pool Not Eligible', action: () => {}, disabled: true, variant: 'error' };
+    if (priceImpactHigh) return { label: 'Price Impact Too High', action: () => {}, disabled: true, variant: 'warning' };
+    if (!selectedPool.path) return { label: 'Building Path...', action: () => {}, disabled: true, variant: 'loading' };
 
     if (needsApproval) {
       if (status === 'approving') return { label: 'Approving...', action: () => {}, disabled: true, variant: 'loading' };
@@ -315,9 +340,11 @@ export default function SwapCard() {
 
         <div className="flex items-center gap-3">
           <div className="flex-1 text-2xl font-semibold text-text-secondary min-w-0 overflow-hidden">
-            {swapMode === 'swap' && quote && !quoteLoading
-              ? parseFloat(formatUnits(quote.amountOut, tokenOut.decimals)).toLocaleString(undefined, { maximumFractionDigits: 6 })
-              : swapMode === 'swap' && quoteLoading
+            {swapMode === 'swap' && selectedPool && !poolsLoading
+              ? parseFloat(
+                  (Number(selectedPool.output) / 10 ** tokenOut.decimals).toString()
+                ).toLocaleString(undefined, { maximumFractionDigits: 6 })
+              : swapMode === 'swap' && poolsLoading
               ? <span className="text-text-muted">...</span>
               : <span className="text-text-muted">0.0</span>
             }
@@ -335,23 +362,25 @@ export default function SwapCard() {
         </div>
       )}
 
-      {/* Quote details */}
+      {/* Pool assessment + quote details */}
       {swapMode === 'swap' && (
         <div className="mt-5">
           <QuoteDetails
-            quote={quote}
             pools={pools}
-            loading={quoteLoading}
-            error={quoteError}
+            selectedPool={selectedPool}
+            loading={poolsLoading}
+            selectingPool={selectingPool}
+            error={poolsError}
             tokenIn={tokenIn}
             tokenOut={tokenOut}
+            onSelectPool={handlePoolSelect}
           />
         </div>
       )}
 
       {/* Transaction details */}
       <div className="mt-3">
-        <TransactionDetails quote={quote} txInfo={txInfo} />
+        <TransactionDetails selectedPool={selectedPool} txInfo={txInfo} />
       </div>
 
       {/* Slippage quick config */}
@@ -410,9 +439,10 @@ export default function SwapCard() {
         </motion.button>
       </div>
 
-      {/* Error display */}
+      {/* Error display — swap/approve/wrap execution errors. Pool assessment
+          errors already surface through the button label above. */}
       <AnimatePresence>
-        {(swapError || quoteError) && (
+        {swapError && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -420,7 +450,7 @@ export default function SwapCard() {
             className="mt-3 flex items-start gap-2 p-3 rounded-xl border border-error/20 bg-error/5"
           >
             <AlertTriangle size={14} className="text-error shrink-0 mt-0.5" />
-            <p className="text-xs text-error leading-relaxed">{swapError || quoteError}</p>
+            <p className="text-xs text-error leading-relaxed">{swapError}</p>
           </motion.div>
         )}
       </AnimatePresence>
@@ -477,3 +507,4 @@ function TokenSelectButton({ token, onClick }: { token: TokenInfo; onClick: () =
     </button>
   );
 }
+

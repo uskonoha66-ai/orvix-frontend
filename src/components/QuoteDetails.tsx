@@ -1,18 +1,20 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, AlertTriangle, TrendingDown, Route, Droplets, ArrowDownToLine, Layers } from 'lucide-react';
+import { ChevronDown, AlertTriangle, TrendingDown, Droplets, ArrowDownToLine, Layers, Loader2 } from 'lucide-react';
 import { formatUnits } from 'ethers';
-import type { QuoteResult, PoolAssessment, TokenInfo } from '../types';
+import type { PoolAssessment, TokenInfo } from '../types';
 import { decodeFailReason } from '../types';
 import { QuoteSkeleton } from './ui/Skeleton';
 
 interface QuoteDetailsProps {
-  quote: QuoteResult | null;
   pools: PoolAssessment[];
+  selectedPool: PoolAssessment | null;
   loading: boolean;
+  selectingPool: boolean;
   error: string | null;
   tokenIn: TokenInfo;
   tokenOut: TokenInfo;
+  onSelectPool: (pool: PoolAssessment) => void;
 }
 
 function formatToken(wei: bigint, decimals: number): string {
@@ -35,15 +37,23 @@ function shortAddr(addr: string): string {
   return addr.slice(0, 8) + '...' + addr.slice(-4);
 }
 
-function LiquidityLabel(profile: string): { label: string; color: string } {
-  const p = profile.toLowerCase();
-  if (p.includes('high')) return { label: profile, color: 'text-success' };
-  if (p.includes('medium') || p.includes('moderate')) return { label: profile, color: 'text-warning' };
-  if (p.includes('low') || p.includes('poor')) return { label: profile, color: 'text-error' };
-  return { label: profile || 'Unknown', color: 'text-text-secondary' };
-}
-
-export default function QuoteDetails({ quote, pools, loading, error, tokenIn, tokenOut }: QuoteDetailsProps) {
+/**
+ * Orvix lets the user pick ANY pool from this list (not just the
+ * best-scored one) as an educational/transparency feature — matching the
+ * CLI's "SELECT POOL FOR SWAP" flow. Clicking a pool here calls
+ * onSelectPool(), which triggers useQuote's selectPool() to fetch the real
+ * swap path for that specific pool from POST /api/build-path-for-pool.
+ */
+export default function QuoteDetails({
+  pools,
+  selectedPool,
+  loading,
+  selectingPool,
+  error,
+  tokenIn,
+  tokenOut,
+  onSelectPool,
+}: QuoteDetailsProps) {
   return (
     <div className="px-5 md:px-0 md:max-w-[480px] mx-auto w-full space-y-3">
       <AnimatePresence mode="wait">
@@ -66,53 +76,30 @@ export default function QuoteDetails({ quote, pools, loading, error, tokenIn, to
           </motion.div>
         )}
 
-        {quote && !loading && !error && (
+        {pools.length > 0 && !loading && !error && (
           <motion.div
-            key="quote"
+            key="pools"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="space-y-2.5"
+            className="space-y-2"
           >
-            <Row icon={<ArrowDownToLine size={14} />} label="Expected Output" value={`${formatToken(quote.amountOut, tokenOut.decimals)} ${tokenOut.symbol}`} />
-            <Row icon={<TrendingDown size={14} />} label="Minimum Received" value={`${formatToken(quote.amountOutMin, tokenOut.decimals)} ${tokenOut.symbol}`} />
-            <Row
-              icon={<Route size={14} />}
-              label="Execution Route"
-              value={quote.hops.length > 1 ? `${quote.hops.length} hops` : 'Direct'}
-            />
-            <Row
-              icon={<Droplets size={14} />}
-              label="Liquidity Source"
-              value={shortAddr(quote.bestPool)}
-              valueClass={LiquidityLabel(quote.liquidityProfile).color}
-            />
-            <Row
-              icon={<TrendingDown size={14} />}
-              label="Price Impact"
-              value={formatBps(quote.priceImpact)}
-              valueClass={Number(quote.priceImpact) > 50000 ? 'text-error' : Number(quote.priceImpact) > 10000 ? 'text-warning' : 'text-text-secondary'}
-            />
-            <Row icon={<Layers size={14} />} label="Pool Liquidity" value={`${formatToken(quote.poolLiquidity, tokenIn.decimals)} ${tokenIn.symbol}`} />
-
-            {/* Hops detail */}
-            {quote.hops.length > 0 && (
-              <div className="pt-1">
-                <p className="text-xs text-text-muted mb-1.5">Route Hops</p>
-                <div className="space-y-1">
-                  {quote.hops.map((h, i) => (
-                    <div key={i} className="flex items-center justify-between text-[11px]">
-                      <span className="text-text-secondary">{shortAddr(h.pool)}</span>
-                      <span className="text-text-muted">→ {shortAddr(h.tokenOut)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <p className="text-xs text-text-muted px-0.5">Select a pool to swap through</p>
+            {pools.map((p, i) => (
+              <PoolCard
+                key={p.pool}
+                pool={p}
+                tokenOut={tokenOut}
+                isBest={i === 0}
+                isSelected={selectedPool?.pool === p.pool}
+                isFetchingPath={selectingPool && selectedPool?.pool === p.pool}
+                onClick={() => p.eligible && onSelectPool(p)}
+              />
+            ))}
           </motion.div>
         )}
 
-        {!loading && !error && !quote && (
+        {!loading && !error && pools.length === 0 && (
           <motion.div
             key="empty"
             initial={{ opacity: 0 }}
@@ -120,13 +107,50 @@ export default function QuoteDetails({ quote, pools, loading, error, tokenIn, to
             exit={{ opacity: 0 }}
             className="text-center py-2"
           >
-            <p className="text-xs text-text-muted">Enter an amount to get a quote</p>
+            <p className="text-xs text-text-muted">Enter an amount to see available pools</p>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Pool assessment */}
-      {pools.length > 0 && <PoolAssessmentList pools={pools} tokenOut={tokenOut} />}
+      {/* Selected pool's swap details — only shown once path has been fetched */}
+      {selectedPool?.path && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="space-y-2.5 pt-2 border-t border-border"
+        >
+          <Row
+            icon={<ArrowDownToLine size={14} />}
+            label="Expected Output"
+            value={`${formatToken(selectedPool.output, tokenOut.decimals)} ${tokenOut.symbol}`}
+          />
+          {selectedPool.amountOutMin !== undefined && (
+            <Row
+              icon={<TrendingDown size={14} />}
+              label="Minimum Received"
+              value={`${formatToken(selectedPool.amountOutMin, tokenOut.decimals)} ${tokenOut.symbol}`}
+            />
+          )}
+          <Row icon={<Droplets size={14} />} label="Selected Pool" value={shortAddr(selectedPool.pool)} />
+          <Row
+            icon={<TrendingDown size={14} />}
+            label="Price Impact"
+            value={formatBps(selectedPool.priceImpact)}
+            valueClass={
+              Number(selectedPool.priceImpact) > 5000
+                ? 'text-error'
+                : Number(selectedPool.priceImpact) > 1000
+                ? 'text-warning'
+                : 'text-text-secondary'
+            }
+          />
+          <Row
+            icon={<Layers size={14} />}
+            label="Pool Liquidity"
+            value={`${formatToken(selectedPool.liquidity, tokenIn.decimals)} ${tokenIn.symbol}`}
+          />
+        </motion.div>
+      )}
     </div>
   );
 }
@@ -143,47 +167,57 @@ function Row({ icon, label, value, valueClass = 'text-text-secondary' }: { icon:
   );
 }
 
-function PoolAssessmentList({ pools, tokenOut }: { pools: PoolAssessment[]; tokenOut: TokenInfo }) {
-  const [expanded, setExpanded] = useState(false);
-
+function PoolCard({
+  pool,
+  tokenOut,
+  isBest,
+  isSelected,
+  isFetchingPath,
+  onClick,
+}: {
+  pool: PoolAssessment;
+  tokenOut: TokenInfo;
+  isBest: boolean;
+  isSelected: boolean;
+  isFetchingPath: boolean;
+  onClick: () => void;
+}) {
   return (
-    <div className="rounded-xl border border-border bg-white/[0.02] overflow-hidden">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between p-3 hover:bg-hover transition-colors"
-      >
-        <span className="text-xs font-medium text-text-secondary">Pool Assessment ({pools.length})</span>
-        <ChevronDown size={14} className={`text-text-muted transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`} />
-      </button>
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22 }}
-            className="overflow-hidden"
-          >
-            <div className="p-3 pt-0 space-y-2">
-              {pools.map((p, i) => (
-                <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-white/[0.02]">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-1.5 h-1.5 rounded-full ${p.eligible ? 'bg-success' : 'bg-error'}`} />
-                    <span className="text-[11px] text-text-secondary">{shortAddr(p.pool)}</span>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[11px] text-text-primary">{formatToken(p.output, tokenOut.decimals)}</p>
-                    <p className="text-[10px] text-text-muted">
-                      {p.eligible ? `Score ${Number(p.score)}` : decodeFailReason(p.failReason)}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+    <button
+      onClick={onClick}
+      disabled={!pool.eligible}
+      className={`w-full flex items-center justify-between p-3 rounded-xl border transition-all duration-200 text-left ${
+        isSelected
+          ? 'border-accent-cyan/60 bg-accent-cyan/[0.06]'
+          : pool.eligible
+          ? 'border-border bg-white/[0.02] hover:border-border-hover hover:bg-hover'
+          : 'border-border bg-white/[0.01] opacity-50 cursor-not-allowed'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${pool.eligible ? 'bg-success' : 'bg-error'}`} />
+        <div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-mono text-text-secondary">{shortAddr(pool.pool)}</span>
+            {isBest && pool.eligible && (
+              <span className="px-1.5 py-0.5 rounded-full bg-accent-cyan/15 text-accent-cyan text-[9px] font-semibold">
+                BEST
+              </span>
+            )}
+          </div>
+          {!pool.eligible && (
+            <p className="text-[10px] text-error mt-0.5">{decodeFailReason(pool.failReason)}</p>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="text-right">
+          <p className="text-[11px] font-medium text-text-primary">{formatToken(pool.output, tokenOut.decimals)}</p>
+          <p className="text-[10px] text-text-muted">{pool.eligible ? `Score ${Number(pool.score).toLocaleString()}` : ''}</p>
+        </div>
+        {isFetchingPath && <Loader2 size={12} className="text-accent-cyan animate-spin shrink-0" />}
+      </div>
+    </button>
   );
 }
 
