@@ -1,10 +1,53 @@
 import { useState, useCallback } from 'react';
 import { BrowserProvider, Contract, parseUnits } from 'ethers';
-import type { Signer } from 'ethers';
+import type { Signer, TransactionReceipt } from 'ethers';
 import { ADDRESSES, ORVIX_ABI, ERC20_ABI, WBNB_ABI } from '../constants/contracts';
 import type { TokenInfo, TxInfo, PoolAssessment } from '../types';
 import { parseBackendError } from './useQuote';
+import { withRpcRetry, isRateLimitError } from './rpcRetry';
 import { useSettings } from '../contexts/SettingsContext';
+
+const RECEIPT_POLL_INTERVAL_MS = 3000;
+const RECEIPT_MAX_ATTEMPTS = 40; // ~2 minutes total across retries/fallbacks
+
+/**
+ * Waits for a transaction receipt WITHOUT relying solely on the wallet's
+ * (e.g. MetaMask's) built-in provider/RPC. MetaMask's default RPC can get
+ * rate-limited (error -32005 "Request is being rate limited") especially on
+ * public testnet endpoints, which previously made tx.wait() hang or throw
+ * even though the transaction itself succeeded on-chain.
+ *
+ * Instead, this polls eth_getTransactionReceipt manually through
+ * withRpcRetry — the same fallback RPC rotation used everywhere else in the
+ * app (see rpcRetry.ts / FALLBACK_RPCS) — so a rate-limited or flaky RPC
+ * automatically rotates to the next one rather than failing the whole
+ * transaction flow.
+ */
+async function waitForReceiptWithRetry(
+  txHash: string,
+  preferredRpc?: string
+): Promise<TransactionReceipt | null> {
+  for (let attempt = 0; attempt < RECEIPT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const receipt = await withRpcRetry(async (provider) => {
+        return provider.getTransactionReceipt(txHash);
+      }, preferredRpc);
+
+      if (receipt) return receipt;
+      // Not mined yet — wait and poll again
+      await new Promise((resolve) => setTimeout(resolve, RECEIPT_POLL_INTERVAL_MS));
+    } catch (e) {
+      // Only keep retrying on rate-limit/network errors; anything else
+      // (e.g. malformed hash) should surface immediately.
+      if (!isRateLimitError(e)) throw e;
+      await new Promise((resolve) => setTimeout(resolve, RECEIPT_POLL_INTERVAL_MS));
+    }
+  }
+  throw new Error(
+    `Timed out waiting for transaction receipt after ${(RECEIPT_MAX_ATTEMPTS * RECEIPT_POLL_INTERVAL_MS) / 1000}s. ` +
+      `The transaction may still confirm — check the explorer using the tx hash.`
+  );
+}
 
 export function useSwapExecution() {
   const { settings } = useSettings();
@@ -51,7 +94,7 @@ export function useSwapExecution() {
         const MAX = BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff');
         const tx = await contract.approve(ADDRESSES.ORVIX_AGGREGATOR, MAX);
         setTxInfo({ hash: tx.hash, status: 'pending', type: 'approve' });
-        await tx.wait();
+        await waitForReceiptWithRetry(tx.hash, settings.rpcUrl);
         setTxInfo({ hash: tx.hash, status: 'confirmed', type: 'approve' });
         setStatus('idle');
         return true;
@@ -62,7 +105,7 @@ export function useSwapExecution() {
         return false;
       }
     },
-    [getSigner]
+    [getSigner, settings.rpcUrl]
   );
 
   /**
@@ -135,7 +178,7 @@ export function useSwapExecution() {
         );
 
         setTxInfo({ hash: tx.hash, status: 'pending', type: 'swap' });
-        const receipt = await tx.wait();
+        const receipt = await waitForReceiptWithRetry(tx.hash, settings.rpcUrl);
 
         if (receipt?.status === 1) {
           setTxInfo({ hash: tx.hash, status: 'confirmed', type: 'swap' });
@@ -154,7 +197,7 @@ export function useSwapExecution() {
         return null;
       }
     },
-    [getSigner, settings.treasury, settings.integrator]
+    [getSigner, settings.treasury, settings.integrator, settings.rpcUrl]
   );
 
   const wrapBNB = useCallback(
@@ -167,7 +210,7 @@ export function useSwapExecution() {
         const amountWei = parseUnits(amount, 18);
         const tx = await contract.deposit({ value: amountWei });
         setTxInfo({ hash: tx.hash, status: 'pending', type: 'wrap' });
-        await tx.wait();
+        await waitForReceiptWithRetry(tx.hash, settings.rpcUrl);
         setTxInfo({ hash: tx.hash, status: 'confirmed', type: 'wrap' });
         setStatus('idle');
         return tx.hash;
@@ -178,7 +221,7 @@ export function useSwapExecution() {
         return null;
       }
     },
-    [getSigner]
+    [getSigner, settings.rpcUrl]
   );
 
   const unwrapWBNB = useCallback(
@@ -191,7 +234,7 @@ export function useSwapExecution() {
         const amountWei = parseUnits(amount, 18);
         const tx = await contract.withdraw(amountWei);
         setTxInfo({ hash: tx.hash, status: 'pending', type: 'unwrap' });
-        await tx.wait();
+        await waitForReceiptWithRetry(tx.hash, settings.rpcUrl);
         setTxInfo({ hash: tx.hash, status: 'confirmed', type: 'unwrap' });
         setStatus('idle');
         return tx.hash;
@@ -202,7 +245,7 @@ export function useSwapExecution() {
         return null;
       }
     },
-    [getSigner]
+    [getSigner, settings.rpcUrl]
   );
 
   const reset = useCallback(() => {

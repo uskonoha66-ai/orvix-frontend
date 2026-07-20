@@ -15,6 +15,20 @@ import TransactionDetails from './TransactionDetails';
 const BNB_TOKEN = VERIFIED_TOKENS[0];
 const WBNB_TOKEN = VERIFIED_TOKENS[1];
 
+/**
+ * Shrinks the amount input's font size as the number of visible characters
+ * grows, so long numbers (e.g. wallet-max BNB balances like
+ * "15.01831395917728") never get covered by the token selector button.
+ * Mirrors the pattern used by Uniswap and similar swap UIs.
+ */
+function inputFontSize(value: string): string {
+  const len = value.length;
+  if (len <= 8) return 'text-2xl';
+  if (len <= 12) return 'text-xl';
+  if (len <= 16) return 'text-lg';
+  return 'text-base';
+}
+
 export default function SwapCard() {
   const { address, connected, provider, connect } = useWallet();
   const { settings } = useSettings();
@@ -311,7 +325,7 @@ export default function SwapCard() {
             value={amountIn}
             onChange={(e) => setAmountIn(e.target.value)}
             placeholder="0.0"
-            className="flex-1 bg-transparent text-2xl font-semibold focus:outline-none placeholder:text-text-muted min-w-0"
+            className={`flex-1 bg-transparent font-semibold focus:outline-none placeholder:text-text-muted min-w-0 truncate ${inputFontSize(amountIn)}`}
           />
           <TokenSelectButton token={tokenIn} onClick={() => setTokenModalOpen('in')} />
         </div>
@@ -339,7 +353,13 @@ export default function SwapCard() {
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex-1 text-2xl font-semibold text-text-secondary min-w-0 overflow-hidden">
+          <div
+            className={`flex-1 font-semibold text-text-secondary min-w-0 truncate ${inputFontSize(
+              swapMode === 'swap' && selectedPool
+                ? (Number(selectedPool.output) / 10 ** tokenOut.decimals).toString()
+                : ''
+            )}`}
+          >
             {swapMode === 'swap' && selectedPool && !poolsLoading
               ? parseFloat(
                   (Number(selectedPool.output) / 10 ** tokenOut.decimals).toString()
@@ -450,7 +470,7 @@ export default function SwapCard() {
             className="mt-3 flex items-start gap-2 p-3 rounded-xl border border-error/20 bg-error/5"
           >
             <AlertTriangle size={14} className="text-error shrink-0 mt-0.5" />
-            <p className="text-xs text-error leading-relaxed">{swapError}</p>
+            <p className="text-xs text-error leading-relaxed break-words max-w-full min-w-0 max-h-[120px] overflow-y-auto">{swapError}</p>
           </motion.div>
         )}
       </AnimatePresence>

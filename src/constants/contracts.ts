@@ -124,19 +124,11 @@ export const VERIFIED_TOKENS: TokenInfo[] = [
     verified: true,
   },
   {
-    address: '0x337610d27C682E347C9cD60bD4B3B107c9D34EDD',
+    address: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd',
     symbol: 'USDT',
-    name: 'Tether USD',
+    name: 'Tether USDT Token',
     decimals: 18,
     logoURI: 'https://assets.coingecko.com/coins/images/325/small/Tether.png',
-    verified: true,
-  },
-  {
-    address: '0xeD24FC36d5Ee211Ea25A80239Fb8C4Cfd80f12Ee',
-    symbol: 'BUSD',
-    name: 'Binance USD',
-    decimals: 18,
-    logoURI: 'https://assets.coingecko.com/coins/images/9576/small/BUSD.png',
     verified: true,
   },
   {
@@ -150,7 +142,7 @@ export const VERIFIED_TOKENS: TokenInfo[] = [
     address: '0xE844E1201df67D3c4aAA5656b2296a775C9F844A',
     symbol: 'TRAV',
     name: 'TRAV Token',
-    decimals: 18,
+    decimals: 9,
     verified: true,
   },
   {

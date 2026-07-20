@@ -12,13 +12,39 @@ function parseBackendError(e: unknown): string {
   if (err.reason) return err.reason;
   if (err.data?.message) return err.data.message;
   const code = err.code;
+
+  // Ethers v6 often wraps raw JSON-RPC provider errors in a single string like:
+  //   could not coalesce error (error={ "code": -32603, "message": "..." }, ...)
+  // with err.code itself set to a generic string like 'UNKNOWN_ERROR' — the real
+  // numeric RPC error code is embedded INSIDE err.message, not at the top level.
+  // We extract it here (from either "code": -32603 or a bare -32603 substring)
+  // so the checks below can match it regardless of which layer it appears in.
+  const nestedCodeMatch = err.message?.match(/"code":\s*(-?\d+)/) ?? err.message?.match(/(-3\d{4})/);
+  const nestedCode = nestedCodeMatch ? parseInt(nestedCodeMatch[1], 10) : undefined;
+  const effectiveCode = typeof code === 'number' ? code : nestedCode;
+
+  // Standard JSON-RPC error codes (https://www.jsonrpc.org/specification#error_object
+  // + Ethereum provider conventions).
+  if (effectiveCode === -32005) return 'RPC Rate Limited — Retrying with alternate node...';
+  if (effectiveCode === -32603) return 'RPC Internal Error — please try again';
+  if (effectiveCode === -32602) return 'Invalid Request Parameters';
+  if (effectiveCode === -32601) return 'RPC Method Not Supported';
+  if (effectiveCode === -32600) return 'Invalid RPC Request';
+  if (effectiveCode === -32000 || effectiveCode === -32001) return 'Transaction Reverted or RPC Error';
+  if (effectiveCode === 4001) return 'Transaction Rejected'; // MetaMask user-denied convention
+  if (effectiveCode === -32002) return 'Request Already Pending — check your wallet';
+
   if (err.message) {
     const msg = err.message.replace(/\(action=.*\)/, '').trim();
+    if (msg.includes('rate limit') || msg.includes('rate-limited') || msg.includes('too many requests') || msg.includes('429'))
+      return 'RPC Rate Limited — Retrying with alternate node...';
     if (msg.includes('insufficient liquidity') || msg.includes('4a1ebbb2')) return 'InsufficientLiquidity()';
     if (msg.includes('PRICE_IMPACT') || msg.includes('price impact')) return 'Price Impact Too High';
     if (msg.includes('timeout') || code === 'TIMEOUT') return 'Timeout';
     if (msg.includes('could not detect network') || code === 'NETWORK_ERROR') return 'RPC Unavailable';
     if (msg.includes('user rejected') || msg.includes('denied')) return 'Transaction Rejected';
+    if (msg.includes('insufficient funds')) return 'Insufficient Funds for Gas';
+    if (msg.includes('nonce')) return 'Nonce Error — please retry';
     if (msg.includes('13c9b4a8')) return 'Expired()';
     if (msg.includes('4e6ecda7')) return 'InvalidPath()';
     if (msg.includes('c85d0ccd')) return 'InvalidPool()';
@@ -27,7 +53,9 @@ function parseBackendError(e: unknown): string {
     if (msg.includes('69c83c3b')) return 'OnlyWrappedNative()';
     if (msg.includes('d01a83a0')) return 'CircuitBreakerActive()';
     if (msg.includes('71c4efed')) return 'SlippageExceeded()';
-    return msg;
+    // Fallback: truncate raw messages so they never overflow the error card,
+    // even with the break-words/max-h fix already applied to the UI.
+    return msg.length > 200 ? msg.slice(0, 200) + '...' : msg;
   }
   return 'Unknown error';
 }

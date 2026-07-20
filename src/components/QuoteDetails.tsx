@@ -72,7 +72,7 @@ export default function QuoteDetails({
             className="flex items-start gap-2 p-3 rounded-xl border border-error/20 bg-error/5"
           >
             <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" />
-            <p className="text-xs text-error leading-relaxed">{error}</p>
+            <p className="text-xs text-error leading-relaxed break-words max-w-full min-w-0 max-h-[120px] overflow-y-auto">{error}</p>
           </motion.div>
         )}
 
