@@ -277,9 +277,21 @@ export function useAllowance() {
       try {
         return await withRpcRetry(async (provider) => {
           const contract = new Contract(token.address, ERC20_ABI, provider);
-          return await contract.allowance(walletAddress, ADDRESSES.ORVIX_AGGREGATOR);
+          console.log('[Orvix useAllowance] contract target:', token.address);
+          console.log('[Orvix useAllowance] owner:', walletAddress);
+          console.log('[Orvix useAllowance] spender (ORVIX_AGGREGATOR):', ADDRESSES.ORVIX_AGGREGATOR);
+          console.log('[Orvix useAllowance] rpc used:', settings.rpcUrl);
+          const result = await contract.allowance(walletAddress, ADDRESSES.ORVIX_AGGREGATOR);
+          console.log('[Orvix useAllowance] result:', result.toString());
+          return result;
         }, settings.rpcUrl);
-      } catch {
+      } catch (e) {
+        // Previously this silently returned 0n on ANY error, which made a
+        // failed/unreadable allowance look identical to a genuine zero
+        // allowance — hiding exactly the kind of BAD_DATA / RPC issue we're
+        // debugging. Log it so it's visible in the console instead of
+        // disappearing.
+        console.log('[Orvix useAllowance] FAILED, returning 0n as fallback. Error:', e);
         return 0n;
       }
     },

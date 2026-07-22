@@ -75,12 +75,49 @@ export function useSwapExecution() {
       try {
         const signer = await getSigner(provider);
         const contract = new Contract(token.address, ERC20_ABI, signer);
+        const ownerAddress = await signer.getAddress();
 
-        // Check current allowance first
-        const currentAllowance = await contract.allowance(
-          await signer.getAddress(),
-          ADDRESSES.ORVIX_AGGREGATOR
-        );
+        // DIAGNOSTIC LOGGING — compare these runtime values against the CLI's
+        // known-working call (token address, wallet address, ORVIX_AGGREGATOR)
+        // to catch cases where the frontend is silently calling allowance()
+        // against a wrong/mismatched contract address, wrong network, or
+        // wrong signer — rather than a transient RPC issue. Check via remote
+        // debugging (chrome://inspect or Eruda) on the device where approve
+        // fails.
+        console.log('[Orvix approve] contract target:', await contract.getAddress());
+        console.log('[Orvix approve] token.address (input):', token.address);
+        console.log('[Orvix approve] owner:', ownerAddress);
+        console.log('[Orvix approve] spender (ORVIX_AGGREGATOR):', ADDRESSES.ORVIX_AGGREGATOR);
+        try {
+          const net = await provider.getNetwork();
+          console.log('[Orvix approve] chainId (from wallet provider):', net.chainId.toString());
+        } catch (netErr) {
+          console.log('[Orvix approve] failed to read network from provider:', netErr);
+        }
+
+        // Check current allowance first. Some wallet-injected providers
+        // (e.g. certain MetaMask forks/clones) occasionally return an empty
+        // "0x" response for eth_call right after a network switch or while
+        // their internal RPC cache is catching up — ethers then throws
+        // "could not decode result data ... code=BAD_DATA" even though the
+        // contract and chain are both correct. This is transient, so we
+        // retry a few times with a short delay before giving up, rather
+        // than failing the whole approve flow on one flaky read.
+        let currentAllowance: bigint | null = null;
+        let lastAllowanceError: unknown = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            currentAllowance = await contract.allowance(ownerAddress, ADDRESSES.ORVIX_AGGREGATOR);
+            break;
+          } catch (e) {
+            lastAllowanceError = e;
+            console.log(`[Orvix approve] allowance() attempt ${attempt + 1} failed:`, e);
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+          }
+        }
+        if (currentAllowance === null) {
+          throw lastAllowanceError ?? new Error('Failed to read current allowance');
+        }
 
         const amountInWei = parseUnits(amountIn, token.decimals);
 
